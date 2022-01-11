@@ -16,6 +16,9 @@ jobs:
       - name: List files in the repository
         run: |
           ls ${{ github.workspace }}
+      - name: Install bdist_wheel
+        run: |
+          pip install wheel
       - name: Make it
         run: |
           make
