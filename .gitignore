@@ -1,0 +1,20 @@
+/build/
+*.bak
+*.o
+*.out
+*.exe
+*.i
+# -ftrace-time output
+*.cpp.json
+cxx-bucket-vs*/
+.vs/
+.vscode/
+.cache/
+generated/
+out/
+.gdb_history
+build-*
+first.supp
+CMakeSettings.json
+
+compile_commands.json
