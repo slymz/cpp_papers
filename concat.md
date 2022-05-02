@@ -1,7 +1,7 @@
 ---
 title: "`views::concat`"
-document: P2542R1
-date: 2021-03-16
+document: P2542R2
+date: 2021-04-21
 audience: SG9, LEWG
 author:
   - name: Hui Xie
@@ -180,6 +180,66 @@ range's `range_rvalue_reference_t`.
 In order to make `concat_view` model `input_range`, `reference`, `value_type`,
 and `range_rvalue_reference_t` have to be constrained so that the iterator of
 the `concat_view` models `indirectly_readable`.
+
+### Mixing xvalue ranges with prvalue ranges
+
+In the following example,
+
+```cpp
+std::vector<std::string> v = ...;
+auto r1 = v | std::views::transform([](auto&& s) -> std::string&& {return std::move(s);});
+auto r2 = std::views::iota(0, 2)
+            | std::views::transform([](auto i){return std::to_string(i)});
+auto cv = std::views::concat(r1, r2);
+auto it = cv.begin();
+*it; // first deref
+*it; // second deref
+```
+
+`r1` is a range of which `range_reference_t` is `std::string&&`, while `r2`'s
+`range_reference_t` is `std::string`. The `common_reference_t` between these two
+`reference`s would be `std::string`. After the "first deref", even though the
+result is unused, there is a conversion from `std::string&&` to `std::string`
+when the result of underlying iterator's `operator*` is converted to the
+`common_reference_t`. This is a move construction and the underlying `vector`'s
+element is modified to a moved-from state. Later when the "second deref" is
+called, the result is a moved-from `std::string`. This breaks the "equality
+preserving" requirements.
+
+A naive solution for this problem is to ban all the usages of mixing xvalue
+ranges with prvalue ranges. However, not all of this kind of mixing are
+problematic. For example, `concat`ing a range of `std::string&&` with a range of
+prvalue `std::string_view` is OK, because converting `std::string&&` to
+`std::string_view` does not modify the `std::string&&`. In general, it is not
+possible to decide whether the conversion from `T&&` to `U` modifies `T&&`
+through syntactic requirements. Therefore, the authors of this paper propose to
+use the "equality-preserving" semantic requirements of the requires-expression
+as defined in [concepts.equality].
+
+### Mixing lvalue-reference ranges with prvalue ranges
+
+Similar to `operator*`, `ranges::iter_move` has a similar issue, and it is more
+common to have this issue. For example,
+
+```cpp
+std::vector<std::string> v = ...;
+auto r2 = std::views::iota(0, 2)
+            | std::views::transform([](auto i){return std::to_string(i)});
+auto cv = std::views::concat(v, r2);
+auto it = cv.begin();
+std::ranges::iter_move(it); // first iter_move
+std::ranges::iter_move(it); // second iter_move
+```
+
+`v`'s `range_rvalue_reference_t` is `std::string&&`, and `r2`'s
+`range_rvalue_reference_t` is `std::string`, the `common_reference_t` between
+them is `std::string`. After the first `iter_move`, the underlying `vector`'s
+first element is moved to construct the temporary `common_reference_t`, aka
+`std::string`. As a result, the second `iter_move` results in a moved-from state
+`std::string`. This breaks the "non-modifying" equality-preserving contract in
+`indirectly_readable` concept. Similar to `operator*`, in this paper, such
+modifying conversion is disallowed through the "equality-preserving" semantic
+requirements.
 
 ### Unsupported Cases and Potential Extensions for the Future
 
@@ -391,16 +451,14 @@ for(auto&& i : std::views::concat(v1, v2, v3, a, s)){
 ```cpp
 namespace std::ranges {
 
-  template <class... Ts>
-  concept @*have_common_reference*@ = requires {  // exposition only
-      typename common_reference_t<Ts...>;
-  } &&
-  (convertible_to<Ts, common_reference_t<Ts...>> && ...);
-  
-  template <class... Ts>
-  concept @*have_common_type*@ = requires {       // exposition only
-      typename common_type_t<Ts...>;
-  };
+  template <class... Rs>
+  using @*concat_reference_t*@ = common_reference_t<range_reference_t<Rs>...>; // exposition only
+
+  template <class... Rs>
+  using @*concat_value_t*@ = common_type_t<range_value_t<Rs>...>; // exposition only
+
+  template <class... Rs>
+  using @*concat_rvalue_reference_t*@ = common_reference_t<range_rvalue_reference_t<Rs>...>; // exposition only
 
   template <class... Rs>
   concept @*concat_indirectly_readable*@ = @*see below*@; // exposition only
@@ -460,18 +518,27 @@ concept @*concat_indirectly_readable*@ = @_see below_@;
 
 :::bq
 
-[1]{.pnum} The exposition-only `@*concat_indirectly_readable*@`
-concept is equivalent to:
+[1]{.pnum} []{#concat-indirectly-readable-definition} The exposition-only
+`@*concat_indirectly_readable*@` concept is equivalent to:
 
 ```cpp
+template <class Ref, class RRef, class It>
+concept @*concat_indirectly_readable_impl*@ = requires (const It it){
+  static_cast<Ref>(*it);
+  static_cast<RRef>(ranges::iter_move(it));
+};
+
 template <class... Rs>
 concept @*concat_indirectly_readable*@ =
-  common_reference_with<common_reference_t<range_reference_t<Rs>...>&&,
-                        common_type_t<range_value_t<Rs>...>&> &&
-  common_reference_with<common_reference_t<range_reference_t<Rs>...>&&,
-                        common_reference_t<range_rvalue_reference_t<Rs>...>&&> &&
-  common_reference_with<common_reference_t<range_rvalue_reference_t<Rs>...>&&,
-                        common_type_t<range_value_t<Rs>...> const &>;
+  common_reference_with<@*concat_reference_t*@<Rs...>&&, 
+                        @*concat_value_t*@<Rs...>&> &&
+  common_reference_with<@*concat_reference_t*@<Rs...>&&, 
+                        @*concat_rvalue_reference_t*@<Rs...>&&> &&
+  common_reference_with<@*concat_rvalue_reference_t*@<Rs...>&&, 
+                        @*concat_value_t*@<Rs...> const&> &&
+  (@*concat_indirectly_readable_impl*@<@*concat_reference_t*@<Rs...>, 
+                                   @*concat_rvalue_reference_t*@<Rs...>, 
+                                   iterator_t<Rs>> && ...);
 ```
 
 :::
@@ -488,11 +555,11 @@ concept is equivalent to:
 
 ```cpp
 template <class... Rs>
-concept @_concatable_@ = 
-  @*have_common_reference*@<range_reference_t<Rs>...> &&
-  @*have_common_type*@<range_value_t<Rs>...> &&
-  @*have_common_reference*@<range_rvalue_reference_t<Rs>...> &&
-  @*concat_indirectly_readable*@<Rs...>;
+concept @_concatable_@ = requires {
+  typename @*concat_reference_t*@<Rs...>;
+  typename @*concat_value_t*@<Rs...>;
+  typename @*concat_rvalue_reference_t*@<Rs...>;
+} && @*concat_indirectly_readable*@<Rs...>;
 ```
 
 :::
